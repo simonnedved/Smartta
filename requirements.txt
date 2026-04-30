@@ -1,0 +1,4 @@
+vosk==0.3.45
+rapidfuzz==3.14.1
+sounddevice==0.5.2
+aiohttp==3.12.15

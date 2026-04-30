@@ -1,0 +1,18 @@
+[
+  {
+    "question": "你好",
+    "answer_audio": "answers/hello.wav"
+  },
+  {
+    "question": "你是谁",
+    "answer_audio": "answers/who_are_you.wav"
+  },
+  {
+    "question": "现在几点了",
+    "answer_audio": "answers/time.wav"
+  },
+  {
+    "question": "再见",
+    "answer_audio": "answers/bye.wav"
+  }
+]
