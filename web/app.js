@@ -15,6 +15,41 @@
   let audioEl = null;
   let rafId = null;
   let usingFallback = false;
+  const scriptLoaders = [
+    {
+      name: "pixi",
+      urls: [
+        "https://cdn.jsdelivr.net/npm/pixi.js@6/dist/browser/pixi.min.js",
+        "https://unpkg.com/pixi.js@6/dist/browser/pixi.min.js",
+        "https://cdn.bootcdn.net/ajax/libs/pixi.js/6.5.10/browser/pixi.min.js",
+      ],
+      test: () => !!window.PIXI,
+    },
+    {
+      name: "live2dcubismcore",
+      urls: [
+        "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js",
+        "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display@master/test/assets/live2d/core/live2dcubismcore.min.js",
+      ],
+      test: () => !!window.Live2DCubismCore,
+    },
+    {
+      name: "pixi-live2d-cubism4",
+      urls: [
+        "https://cdn.jsdelivr.net/npm/pixi-live2d-display/dist/cubism4.min.js",
+        "https://unpkg.com/pixi-live2d-display/dist/cubism4.min.js",
+      ],
+      test: () => !!window?.PIXI?.live2d,
+    },
+    {
+      name: "pixi-live2d",
+      urls: [
+        "https://cdn.jsdelivr.net/npm/pixi-live2d-display/dist/index.min.js",
+        "https://unpkg.com/pixi-live2d-display/dist/index.min.js",
+      ],
+      test: () => !!window?.PIXI?.live2d?.Live2DModel,
+    },
+  ];
 
   function setConnStatus(text) {
     connStatusEl.textContent = text;
@@ -37,6 +72,38 @@
       fallbackAvatar.style.display = usingFallback ? "flex" : "none";
       if (model && model.motion) {
         model.motion("Idle", 0, 3);
+      }
+    }
+  }
+
+  function loadScript(url) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = url;
+      script.async = false;
+      script.onload = () => resolve(true);
+      script.onerror = () => reject(new Error(`加载失败: ${url}`));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function ensureExternalDeps() {
+    for (const loader of scriptLoaders) {
+      if (loader.test()) continue;
+      let ok = false;
+      for (const url of loader.urls) {
+        try {
+          await loadScript(url);
+          if (loader.test()) {
+            ok = true;
+            break;
+          }
+        } catch {
+          // try next mirror
+        }
+      }
+      if (!ok) {
+        throw new Error(`依赖加载失败: ${loader.name}`);
       }
     }
   }
@@ -217,7 +284,15 @@
 
   (async () => {
     setConnStatus("初始化中...");
-    await initLive2D();
+    try {
+      await ensureExternalDeps();
+      await initLive2D();
+    } catch (err) {
+      console.error("前端依赖加载失败:", err);
+      setConnStatus("Live2D 依赖加载失败");
+      usingFallback = true;
+      fallbackAvatar.style.display = "flex";
+    }
     connectWebSocket();
     setTalking(false);
   })();
