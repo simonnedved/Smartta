@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
+from urllib.parse import quote
 
 from aiohttp import WSMsgType, web
 from rapidfuzz import fuzz, process
@@ -37,6 +38,15 @@ SetLogLevel(-1)
 class QAItem:
     question: str
     answer_audio: str
+    answer_text: str
+
+
+@dataclass
+class Live2DConfig:
+    model_dir: Path
+    model_file: Path
+    model_url: str
+    mouth_param_ids: List[str]
 
 
 class FrontendBridge:
@@ -73,10 +83,16 @@ class FrontendBridge:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(payload), self.loop)
 
-    def request_playback(self, audio_relpath: str, timeout: float = 20.0) -> None:
+    def request_playback(self, audio_relpath: str, subtitle: str, timeout: float = 20.0) -> None:
         self.pause_listening.set()
         self.playback_done.clear()
-        self.send_event({"type": "play_audio", "audio": "/" + audio_relpath.replace("\\", "/")})
+        self.send_event(
+            {
+                "type": "play_audio",
+                "audio": "/" + audio_relpath.replace("\\", "/"),
+                "subtitle": subtitle,
+            }
+        )
         finished = self.playback_done.wait(timeout=timeout)
         if not finished:
             print("前端播放超时，恢复监听。")
@@ -94,8 +110,65 @@ def load_qa_library(path: str) -> List[QAItem]:
     for i, row in enumerate(raw):
         if "question" not in row or "answer_audio" not in row:
             raise ValueError(f"问答库第 {i} 项缺少 question 或 answer_audio")
-        items.append(QAItem(question=row["question"], answer_audio=row["answer_audio"]))
+        answer_text = row.get("answer_text") or row.get("subtitle") or row["question"]
+        items.append(
+            QAItem(
+                question=row["question"],
+                answer_audio=row["answer_audio"],
+                answer_text=answer_text,
+            )
+        )
     return items
+
+
+def resolve_path(base_dir: Path, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve()
+
+
+def load_lipsync_param_ids(model_file: Path) -> List[str]:
+    try:
+        with model_file.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return ["ParamMouthOpenY", "PARAM_MOUTH_OPEN_Y"]
+
+    for group in raw.get("Groups", []):
+        if group.get("Name") == "LipSync" and group.get("Ids"):
+            return [str(param_id) for param_id in group["Ids"]]
+    return ["ParamMouthOpenY", "PARAM_MOUTH_OPEN_Y"]
+
+
+def resolve_live2d_config(base_dir: Path, model_dir_arg: str, model_file_arg: Optional[str]) -> Live2DConfig:
+    model_dir = resolve_path(base_dir, model_dir_arg)
+    if not model_dir.exists() or not model_dir.is_dir():
+        raise FileNotFoundError(f"Live2D 模型目录不存在: {model_dir}")
+
+    if model_file_arg:
+        model_file = (model_dir / model_file_arg).resolve()
+        try:
+            model_file.relative_to(model_dir)
+        except ValueError as exc:
+            raise ValueError("Live2D 模型文件必须位于模型目录内") from exc
+    else:
+        candidates = sorted(model_dir.glob("*.model3.json"))
+        if not candidates:
+            raise FileNotFoundError(f"Live2D 模型目录中未找到 *.model3.json: {model_dir}")
+        model_file = candidates[0].resolve()
+
+    if not model_file.exists() or not model_file.is_file():
+        raise FileNotFoundError(f"Live2D 模型文件不存在: {model_file}")
+
+    model_relpath = model_file.relative_to(model_dir).as_posix()
+    model_url = "/live2d/" + quote(model_relpath, safe="/")
+    return Live2DConfig(
+        model_dir=model_dir,
+        model_file=model_file,
+        model_url=model_url,
+        mouth_param_ids=load_lipsync_param_ids(model_file),
+    )
 
 
 class VoiceAssistant:
@@ -206,7 +279,7 @@ class VoiceAssistant:
             return
 
         print(f"通知前端播放答案音频: {audio_path}")
-        self.bridge.request_playback(audio_path)
+        self.bridge.request_playback(audio_path, matched_item.answer_text)
 
     def _drain_audio_queue(self) -> None:
         while True:
@@ -216,15 +289,32 @@ class VoiceAssistant:
                 break
 
 
-def create_web_app(bridge: FrontendBridge, base_dir: Path) -> web.Application:
+@web.middleware
+async def no_cache_middleware(request: web.Request, handler) -> web.StreamResponse:
+    response = await handler(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+def create_web_app(bridge: FrontendBridge, base_dir: Path, live2d_config: Live2DConfig) -> web.Application:
     web_dir = base_dir / "web"
     answers_dir = base_dir / "answers"
-    hiyori_runtime_dir = base_dir / "hiyori_pro_zh" / "runtime"
 
-    app = web.Application()
+    app = web.Application(middlewares=[no_cache_middleware])
 
     async def index(_request: web.Request) -> web.Response:
         return web.FileResponse(web_dir / "index.html")
+
+    async def config(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "live2d_model_url": live2d_config.model_url,
+                "live2d_model_name": live2d_config.model_file.name,
+                "mouth_param_ids": live2d_config.mouth_param_ids,
+            }
+        )
 
     async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20)
@@ -255,15 +345,22 @@ def create_web_app(bridge: FrontendBridge, base_dir: Path) -> web.Application:
         return ws
 
     app.router.add_get("/", index)
+    app.router.add_get("/config", config)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/web/", path=str(web_dir), show_index=False)
     app.router.add_static("/answers/", path=str(answers_dir), show_index=False)
-    app.router.add_static("/hiyori/", path=str(hiyori_runtime_dir), show_index=False)
+    app.router.add_static("/live2d/", path=str(live2d_config.model_dir), show_index=False)
     return app
 
 
-async def start_web_server(bridge: FrontendBridge, host: str, port: int, base_dir: Path) -> web.AppRunner:
-    app = create_web_app(bridge, base_dir)
+async def start_web_server(
+    bridge: FrontendBridge,
+    host: str,
+    port: int,
+    base_dir: Path,
+    live2d_config: Live2DConfig,
+) -> web.AppRunner:
+    app = create_web_app(bridge, base_dir, live2d_config)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
@@ -287,10 +384,20 @@ def parse_args() -> argparse.Namespace:
         help="问答库 JSON 文件路径",
     )
     parser.add_argument(
+        "--live2d-model-dir",
+        default="wanko/runtime",
+        help="Live2D 模型资源目录，默认 wanko/runtime",
+    )
+    parser.add_argument(
+        "--live2d-model-file",
+        default=None,
+        help="Live2D *.model3.json 文件名。默认自动使用模型目录中的第一个 *.model3.json",
+    )
+    parser.add_argument(
         "--threshold",
         type=int,
-        default=72,
-        help="模糊匹配阈值(0-100)，默认 72",
+        default=40,
+        help="模糊匹配阈值(0-100)，默认 40",
     )
     parser.add_argument(
         "--samplerate",
@@ -334,6 +441,12 @@ def main() -> None:
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
     qa_items = load_qa_library(args.qa_path)
+    live2d_config = resolve_live2d_config(
+        base_dir=base_dir,
+        model_dir_arg=args.live2d_model_dir,
+        model_file_arg=args.live2d_model_file,
+    )
+    print(f"Live2D 模型: {live2d_config.model_file}")
     bridge = FrontendBridge(base_dir=base_dir)
     assistant = VoiceAssistant(
         model_path=args.model_path,
@@ -361,7 +474,13 @@ def main() -> None:
     runner: Optional[web.AppRunner] = None
     try:
         runner = loop.run_until_complete(
-            start_web_server(bridge, host=args.host, port=args.port, base_dir=base_dir)
+            start_web_server(
+                bridge=bridge,
+                host=args.host,
+                port=args.port,
+                base_dir=base_dir,
+                live2d_config=live2d_config,
+            )
         )
         loop.run_forever()
     except KeyboardInterrupt:

@@ -3,18 +3,89 @@
   const talkStatusEl = document.getElementById("talk-status");
   const fallbackAvatar = document.getElementById("fallback-avatar");
   const canvas = document.getElementById("live2d-canvas");
+  const subtitleBox = document.getElementById("subtitle-box");
+  const params = new URLSearchParams(location.search);
+  const desktopMode = params.get("desktop") === "1";
 
-  const modelUrl = "/hiyori/hiyori_pro_t11.model3.json";
   const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
+  let modelUrl = "/live2d/wanko_touch.model3.json";
+  let mouthParamIds = ["ParamMouthOpenY", "PARAM_MOUTH_OPEN_Y"];
   let ws = null;
   let app = null;
   let model = null;
-  let audioCtx = null;
-  let analyser = null;
   let audioEl = null;
-  let rafId = null;
+  let mouthDriveActive = false;
   let usingFallback = false;
+  let resizeDrag = null;
+  let subtitleSegments = [];
+  let lastSubtitleIndex = -1;
+  let mouthPhase = 0;
+  let mouthDriveStart = 0;
+  let mouthParamFailed = false;
+  let audioPlaybackActive = false;
+
+  document.documentElement.classList.toggle("desktop-mode", desktopMode);
+  document.body.classList.toggle("desktop-mode", desktopMode);
+  document.body.classList.add("desktop-click-through");
+  if (desktopMode) {
+    fallbackAvatar.textContent = "";
+    createDesktopResizeHandle();
+  }
+
+  window.smarttaDesktop?.onInteractionMode?.((payload) => {
+    document.body.classList.toggle("desktop-click-through", payload.clickThrough);
+    document.body.classList.toggle("desktop-draggable", !payload.clickThrough);
+  });
+
+  function createDesktopResizeHandle() {
+    if (!window.smarttaDesktop) {
+      return;
+    }
+
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = "desktop-resize-handle";
+    handle.title = "拖动调整窗口大小";
+    handle.setAttribute("aria-label", "拖动调整窗口大小");
+    document.body.appendChild(handle);
+
+    handle.addEventListener("pointerdown", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const bounds = await window.smarttaDesktop.getBounds();
+      if (!bounds) {
+        return;
+      }
+
+      resizeDrag = {
+        startX: event.screenX,
+        startY: event.screenY,
+        startWidth: bounds.width,
+        startHeight: bounds.height,
+      };
+      handle.setPointerCapture(event.pointerId);
+    });
+
+    handle.addEventListener("pointermove", (event) => {
+      if (!resizeDrag) {
+        return;
+      }
+
+      const width = resizeDrag.startWidth + event.screenX - resizeDrag.startX;
+      const height = resizeDrag.startHeight + event.screenY - resizeDrag.startY;
+      window.smarttaDesktop.resizeTo(width, height);
+    });
+
+    handle.addEventListener("pointerup", () => {
+      resizeDrag = null;
+    });
+
+    handle.addEventListener("pointercancel", () => {
+      resizeDrag = null;
+    });
+  }
   const scriptLoaders = [
     {
       name: "pixi",
@@ -59,7 +130,26 @@
     talkStatusEl.textContent = `状态: ${text}`;
   }
 
-  function setTalking(isTalking) {
+  async function loadFrontendConfig() {
+    try {
+      const response = await fetch("/config", { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const config = await response.json();
+      if (config.live2d_model_url) {
+        modelUrl = config.live2d_model_url;
+      }
+      if (Array.isArray(config.mouth_param_ids) && config.mouth_param_ids.length > 0) {
+        mouthParamIds = config.mouth_param_ids;
+      }
+    } catch {
+      // keep local defaults when the config endpoint is unavailable
+    }
+  }
+
+  function setTalking(isTalking, options = {}) {
+    const restoreIdle = options.restoreIdle !== false;
     if (isTalking) {
       setTalkStatus("说话中");
       fallbackAvatar.classList.remove("idle");
@@ -70,8 +160,8 @@
       fallbackAvatar.classList.remove("talking");
       fallbackAvatar.classList.add("idle");
       fallbackAvatar.style.display = usingFallback ? "flex" : "none";
-      if (model && model.motion) {
-        model.motion("Idle", 0, 3);
+      if (restoreIdle && !audioPlaybackActive) {
+        playMotion(["Idle"], 0);
       }
     }
   }
@@ -128,18 +218,71 @@
     try {
       model = await Live2DModel.from(modelUrl);
       app.stage.addChild(model);
-      const scale = Math.min(canvas.clientWidth / model.width, canvas.clientHeight / model.height) * 0.92;
-      model.scale.set(scale);
-      model.x = canvas.clientWidth / 2;
-      model.y = canvas.clientHeight * 0.92;
-      model.anchor.set(0.5, 1);
-      if (model.motion) {
-        model.motion("Idle", 0, 3);
-      }
+      layoutModel();
+      window.addEventListener("resize", layoutModel);
+      playMotion(["Idle"], 0);
     } catch (err) {
       console.error("Live2D 加载失败:", err);
       usingFallback = true;
       fallbackAvatar.style.display = "flex";
+    }
+  }
+
+  function layoutModel() {
+    if (!model || !canvas.clientWidth || !canvas.clientHeight) {
+      return;
+    }
+
+    const fitScale = Math.min(canvas.clientWidth / model.width, canvas.clientHeight / model.height);
+    model.scale.set(fitScale * (desktopMode ? 1.03 : 0.92));
+    model.x = canvas.clientWidth / 2;
+    model.y = canvas.clientHeight * (desktopMode ? 0.98 : 0.92);
+    model.anchor.set(0.5, 1);
+  }
+
+  function playMotion(groups, index = 0) {
+    if (audioPlaybackActive) {
+      return;
+    }
+    if (!model || !model.motion) {
+      return;
+    }
+
+    for (const group of groups) {
+      try {
+        const started = model.motion(group, index, 3);
+        if (started !== false) {
+          return;
+        }
+      } catch {
+        // try the next configured motion group
+      }
+    }
+  }
+
+  function stopLive2DMotions() {
+    if (!model) {
+      return;
+    }
+
+    const motionManager = model.internalModel?.motionManager;
+    const candidates = [
+      [model.stopMotions, model],
+      [model.stopMotion, model],
+      [motionManager?.stopAllMotions, motionManager],
+      [motionManager?.stopAllMotionsForAllGroups, motionManager],
+      [motionManager?.stopMotionsForAllGroups, motionManager],
+    ];
+
+    for (const [stop, context] of candidates) {
+      if (typeof stop !== "function") {
+        continue;
+      }
+      try {
+        stop.call(context);
+      } catch {
+        // try the next known motion manager shape
+      }
     }
   }
 
@@ -169,104 +312,200 @@
       }
 
       if (payload.type === "play_audio" && payload.audio) {
-        await playAnswerAudio(payload.audio);
+        await playAnswerAudio(payload.audio, payload.subtitle || payload.text || "");
       }
     };
   }
 
   function cleanupAudioGraph() {
-    if (rafId) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
-    if (analyser) {
-      analyser.disconnect();
-      analyser = null;
-    }
-    if (audioCtx) {
-      audioCtx.close();
-      audioCtx = null;
-    }
+    stopMouthDrive();
+    applyMouthOpen(0);
   }
 
-  function driveMouthByVolume() {
-    if (!analyser) return;
-    const dataArray = new Uint8Array(analyser.fftSize);
-    analyser.getByteTimeDomainData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i += 1) {
-      const v = (dataArray[i] - 128) / 128;
-      sum += v * v;
+  function applyMouthOpen(value) {
+    if (!model || !model.internalModel || !model.internalModel.coreModel) {
+      return;
     }
-    const rms = Math.sqrt(sum / dataArray.length);
-    const mouthOpen = Math.min(1, rms * 7.5);
+
+    const mouthOpen = Math.max(0, Math.min(1, value));
+    for (const paramId of mouthParamIds) {
+      try {
+        model.internalModel.coreModel.setParameterValueById(paramId, mouthOpen);
+      } catch (err) {
+        if (!mouthParamFailed) {
+          mouthParamFailed = true;
+          console.warn("嘴型开合参数驱动不可用:", err);
+        }
+      }
+    }
 
     try {
-      if (model && model.internalModel && model.internalModel.coreModel) {
-        model.internalModel.coreModel.setParameterValueById("ParamMouthOpenY", mouthOpen);
+      model.internalModel.coreModel.setParameterValueById("PARAM_MOUTH_FORM", -0.2 + mouthOpen * 0.35);
+    } catch (err) {
+      if (!mouthParamFailed) {
+        mouthParamFailed = true;
+        console.warn("嘴型变形参数驱动不可用:", err);
       }
-    } catch {
-      usingFallback = true;
-      fallbackAvatar.style.display = "flex";
     }
-
-    rafId = requestAnimationFrame(driveMouthByVolume);
   }
 
-  async function playAnswerAudio(audioPath) {
+  function startMouthDrive() {
+    if (!app || !app.ticker || mouthDriveActive) {
+      return;
+    }
+
+    mouthDriveActive = true;
+    mouthDriveStart = performance.now();
+    mouthPhase = 0;
+    const priority = -10000;
+    app.ticker.add(driveMouthWhilePlaying, null, priority);
+  }
+
+  function stopMouthDrive() {
+    if (app && app.ticker && mouthDriveActive) {
+      app.ticker.remove(driveMouthWhilePlaying, null);
+    }
+    mouthDriveActive = false;
+    applyMouthOpen(0);
+  }
+
+  function driveMouthWhilePlaying() {
+    if (!audioEl || audioEl.paused || audioEl.ended) {
+      stopMouthDrive();
+      return;
+    }
+
+    const elapsed = (performance.now() - mouthDriveStart) / 1000;
+    mouthPhase = elapsed * Math.PI * 2;
+    const syllable = (Math.sin(mouthPhase * 5.5) + 1) / 2;
+    const chatter = (Math.sin(mouthPhase * 9.1 + 0.9) + 1) / 2;
+    const shaped = Math.pow(syllable, 0.38);
+    const mouthOpen = 0.22 + shaped * 0.58 + chatter * 0.12;
+    applyMouthOpen(mouthOpen);
+  }
+
+  function splitSubtitle(text) {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return [];
+    }
+
+    const sentenceParts = normalized
+      .split(/(?<=[。！？!?；;，,、])/u)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const rawParts = sentenceParts.length > 0 ? sentenceParts : [normalized];
+    const segments = [];
+
+    for (const part of rawParts) {
+      if (part.length <= 24) {
+        segments.push(part);
+        continue;
+      }
+      for (let i = 0; i < part.length; i += 24) {
+        segments.push(part.slice(i, i + 24));
+      }
+    }
+
+    return segments;
+  }
+
+  function showSubtitle(text) {
+    if (!subtitleBox) {
+      return;
+    }
+    subtitleBox.textContent = text || "";
+    subtitleBox.classList.toggle("visible", Boolean(text));
+  }
+
+  function clearSubtitle() {
+    subtitleSegments = [];
+    lastSubtitleIndex = -1;
+    showSubtitle("");
+  }
+
+  function updateSubtitleByPlayback() {
+    if (!audioEl || subtitleSegments.length === 0) {
+      return;
+    }
+
+    const duration = Number.isFinite(audioEl.duration) && audioEl.duration > 0
+      ? audioEl.duration
+      : Math.max(2.4, subtitleSegments.length * 1.8);
+    const ratio = Math.min(0.999, Math.max(0, audioEl.currentTime / duration));
+    const index = Math.min(subtitleSegments.length - 1, Math.floor(ratio * subtitleSegments.length));
+
+    if (index !== lastSubtitleIndex) {
+      lastSubtitleIndex = index;
+      showSubtitle(subtitleSegments[index]);
+    }
+  }
+
+  function prepareSubtitle(text) {
+    subtitleSegments = splitSubtitle(text);
+    lastSubtitleIndex = -1;
+    if (subtitleSegments.length > 0) {
+      showSubtitle(subtitleSegments[0]);
+      lastSubtitleIndex = 0;
+    } else {
+      clearSubtitle();
+    }
+  }
+
+  async function playAnswerAudio(audioPath, subtitleText = "") {
     if (audioEl) {
       audioEl.pause();
       audioEl = null;
     }
     cleanupAudioGraph();
+    clearSubtitle();
 
     audioEl = new Audio(audioPath);
     audioEl.preload = "auto";
+    prepareSubtitle(subtitleText);
 
     audioEl.onplay = () => {
+      audioPlaybackActive = true;
+      stopLive2DMotions();
       setTalking(true);
+      updateSubtitleByPlayback();
+      startMouthDrive();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "audio_started" }));
       }
-      if (model && model.motion) {
-        model.motion("TapBody", 0, 3);
-      }
+    };
+
+    audioEl.ontimeupdate = () => {
+      updateSubtitleByPlayback();
     };
 
     audioEl.onended = () => {
-      setTalking(false);
+      audioPlaybackActive = false;
+      clearSubtitle();
       cleanupAudioGraph();
+      setTalking(false);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "audio_finished" }));
       }
     };
 
     audioEl.onerror = () => {
-      setTalking(false);
+      audioPlaybackActive = false;
+      clearSubtitle();
       cleanupAudioGraph();
+      setTalking(false);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "audio_finished" }));
       }
     };
 
     try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      const source = audioCtx.createMediaElementSource(audioEl);
-      source.connect(analyser);
-      analyser.connect(audioCtx.destination);
-      driveMouthByVolume();
-    } catch (err) {
-      console.warn("音量口型驱动不可用，使用简化动画:", err);
-      usingFallback = true;
-      fallbackAvatar.style.display = "flex";
-    }
-
-    try {
       await audioEl.play();
     } catch (err) {
       console.error("音频播放失败:", err);
+      audioPlaybackActive = false;
+      clearSubtitle();
+      cleanupAudioGraph();
       setTalking(false);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "audio_finished" }));
@@ -275,16 +514,13 @@
   }
 
   window.addEventListener("resize", () => {
-    if (!app || !model || !canvas) return;
-    const scale = Math.min(canvas.clientWidth / model.width, canvas.clientHeight / model.height) * 0.92;
-    model.scale.set(scale);
-    model.x = canvas.clientWidth / 2;
-    model.y = canvas.clientHeight * 0.92;
+    layoutModel();
   });
 
   (async () => {
     setConnStatus("初始化中...");
     try {
+      await loadFrontendConfig();
       await ensureExternalDeps();
       await initLive2D();
     } catch (err) {

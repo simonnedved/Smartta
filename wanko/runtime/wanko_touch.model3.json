@@ -1,0 +1,81 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "wanko_touch.moc3",
+		"Textures": [
+			"wanko_touch.1024/texture_00.png"
+		],
+		"Physics": "wanko_touch.physics3.json",
+		"DisplayInfo": "wanko_touch.cdi3.json",
+		"Motions": {
+			"Idle": [
+				{
+					"File": "motion_nomouth/idle_01.motion3.json"
+				},
+				{
+					"File": "motion_nomouth/idle_03.motion3.json"
+				},
+				{
+					"File": "motion_nomouth/idle_04.motion3.json"
+				}
+			],
+			"Flick3": [
+				{
+					"File": "motion_nomouth/idle_02.motion3.json"
+				},
+				{
+					"File": "motion_nomouth/touch_01.motion3.json"
+				}
+			],
+			"Shake": [
+				{
+					"File": "motion_nomouth/shake_01.motion3.json"
+				}
+			],
+			"FlickUp": [
+				{
+					"File": "motion_nomouth/shake_02.motion3.json"
+				}
+			],
+			"Tap": [
+				{
+					"File": "motion_nomouth/touch_02.motion3.json"
+				},
+				{
+					"File": "motion_nomouth/touch_04.motion3.json"
+				}
+			],
+			"Flick": [
+				{
+					"File": "motion_nomouth/touch_03.motion3.json"
+				},
+				{
+					"File": "motion_nomouth/touch_05.motion3.json"
+				}
+			],
+			"FlickLeft": [
+				{
+					"File": "motion_nomouth/touch_06.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"PARAM_EYE_L_OPEN",
+				"PARAM_EYE_R_OPEN"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"PARAM_MOUTH_OPEN_Y"
+			]
+		}
+	],
+	"HitAreas": []
+}

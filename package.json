@@ -1,0 +1,14 @@
+{
+  "name": "smartta-live2d-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional Electron desktop shell for the Smartta Live2D assistant.",
+  "main": "electron/main.js",
+  "scripts": {
+    "electron": "electron electron/main.js",
+    "desktop": "electron electron/main.js --server-url=http://127.0.0.1:8765"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0"
+  }
+}

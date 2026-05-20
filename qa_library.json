@@ -1,18 +1,22 @@
 [
   {
     "question": "你好",
-    "answer_audio": "answers/hello.wav"
+    "answer_audio": "answers/hello.wav",
+    "answer_text": "你好"
   },
   {
     "question": "你是谁",
-    "answer_audio": "answers/who_are_you.wav"
+    "answer_audio": "answers/who_are_you.wav",
+    "answer_text": "你是谁"
   },
   {
-    "question": "现在几点了",
-    "answer_audio": "answers/time.wav"
+    "question": "洛洛，古代没有Project软件，怎么保证工程不延期",
+    "answer_audio": "answers/ans1.wav",
+    "answer_text": "这个问题问得很有意思！古人主要依靠“农隙兴役”和“月报季结”两种方法。前者是利用农闲时节征调民力，既保证工程用工，又不耽误农业生产；后者则要求各施工队按月上报进度，主事官员根据这些信息灵活调配资源。比如北宋时期龙门石窟的开凿工程，就保留着非常详尽的每日用工记录呢。"
   },
   {
     "question": "再见",
-    "answer_audio": "answers/bye.wav"
+    "answer_audio": "answers/bye.wav",
+    "answer_text": "再见"
   }
 ]

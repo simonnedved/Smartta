@@ -7,7 +7,10 @@ env/
 .idea/
 .vscode/
 .DS_Store
-
+node_modules/
+npm-debug.log*
+totoro_hijiki/
+*.wav
 *.pth
 *.pt
 *.ckpt
