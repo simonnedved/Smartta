@@ -249,6 +249,16 @@ cd C:\path\to\Smartta
 npm run desktop
 ```
 
+**如果 npm run desktop 指令报错**
+### 设置淘宝镜像
+set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+
+### 删除现有的 electron 模块
+rmdir /s /q node_modules\electron
+
+### 重新安装
+npm install electron --save-dev
+
 Electron 快捷键：
 
 - `Ctrl+Alt+D`：切换鼠标穿透 / 可拖动模式
